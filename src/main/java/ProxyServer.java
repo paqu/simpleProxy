@@ -1,19 +1,16 @@
 import com.sun.net.httpserver.*;
 
 import java.io.*;
-import java.net.InetAddress;
-import java.net.InetSocketAddress;
-import java.net.URL;
-import java.net.HttpURLConnection;
+import java.net.*;
 import java.util.List;
 import java.util.Set;
 import java.util.Map;
+
 
 /* to test with localhost server as target server set in firefox
    network.proxy.allow_hijacking_localhost", true
  */
 public class ProxyServer {
-
 
     public static void main(String[] args) throws Exception {
         int port = 9000;
@@ -25,85 +22,81 @@ public class ProxyServer {
         System.out.println("Starting server on port: " + port);
         server.start();
     }
-    /*
-        TODO:
-         *refactor reading and writing streams
-         *refactor:
-            copyHeadersFromServerToClient
-            copyHeadersFromClientToServer
-            looks like code duplication
-         *add mechanism for error handling
-     */
+
     static class RootHandler implements HttpHandler {
         public void handle(HttpExchange exchange) throws IOException {
-            System.out.println("Proxy server used.");
-            HttpURLConnection conn;
-            URL url;
 
-            BufferedInputStream reader;
-            BufferedOutputStream writer;
+            OutputStream out = null;
+            byte [] requestedBody = null;
+            byte [] responseBody = null;
+            HttpURLConnection conn = null;
 
-            Headers requestHeaders   = exchange.getRequestHeaders();
-            Headers responseHeaders  = exchange.getResponseHeaders();
+            Headers requestHeader   = exchange.getRequestHeaders();
+            Headers responseHeaders = exchange.getResponseHeaders();
 
-            byte [] buffer = new byte[1024];
-            int bytesRead = -1;
+            try {
+                conn = (HttpURLConnection) exchange.getRequestURI().toURL().openConnection();
+                conn.setRequestMethod(exchange.getRequestMethod());
+                conn.setInstanceFollowRedirects(false);
 
-            url  = exchange.getRequestURI().toURL();
-            conn = (HttpURLConnection) url.openConnection();
-            conn.setRequestMethod(exchange.getRequestMethod());
-            conn.setInstanceFollowRedirects(false);
-            conn.setDoInput(true);
-            conn.setDoOutput(true);
+                copyHeadersFromClientToServer(conn, requestHeader);
 
-            copyHeadersFromClientToServer(conn, requestHeaders);
+                requestedBody = exchange.getRequestBody().readAllBytes();
+                if (requestedBody.length > 0) {
+                    conn.setDoOutput(true);
+                    out = conn.getOutputStream();
+                    out.write(requestedBody);
+                    out.close();
+                }
 
-            reader = new BufferedInputStream(exchange.getRequestBody());
-            writer = new BufferedOutputStream(conn.getOutputStream());
+                try {
+                    responseBody = conn.getInputStream().readAllBytes();
+                } catch (IOException e) {
+                    responseBody = conn.getErrorStream().readAllBytes();
+                }
 
-            while ((bytesRead = reader.read(buffer)) != -1) {
-                writer.write(buffer, 0, bytesRead);
+                copyHeadersFromServerToClient(responseHeaders, conn.getHeaderFields());
+                responseHeaders.add("Via", InetAddress.getLocalHost().toString());
+                responseHeaders.set("Content-Type", conn.getContentType());
+                exchange.sendResponseHeaders(conn.getResponseCode(), conn.getContentLength());
+                out = exchange.getResponseBody();
+                out.write(responseBody);
+                out.close();
+
+            } catch (MalformedURLException e) {
+                handleError(exchange, 400, "Bad Request");
+            } catch (IOException e) {
+                handleError(exchange, 500, "Internal error");
+            } catch (Exception e) {
+                System.out.println("Other error");
+                e.printStackTrace();
             }
+        }
 
-            reader.close();
-            writer.close();
-
-            responseHeaders.set("Content-Type", conn.getContentType());
-            exchange.sendResponseHeaders(conn.getResponseCode(), conn.getContentLength());
-
-            copyHeadersFromServerToClient(responseHeaders, conn.getHeaderFields());
-            responseHeaders.add("Via", InetAddress.getLocalHost().toString());
-
-            reader = new BufferedInputStream(conn.getInputStream());
-            writer = new BufferedOutputStream(exchange.getResponseBody());
-
-            while ((bytesRead = reader.read(buffer)) != -1) {
-                writer.write(buffer, 0, bytesRead);
+    }
+    static void copyHeadersFromServerToClient(Headers dst, Map<String,List<String>> src)
+    {
+        for (String key : src.keySet()) {
+            for (String value : src.get(key)) {
+                if (key != null && value != null && !"Transfer-Encoding".equalsIgnoreCase(key)) {
+                    dst.add(key, value);
+                }
             }
-
-            reader.close();
-            writer.close();
-
-            conn.disconnect();
+        };
+    }
+    static void copyHeadersFromClientToServer(HttpURLConnection dst, Headers src)
+    {
+        for (String key : src.keySet()) {
+            for (String value : src.get(key)) {
+                dst.addRequestProperty(key, value);
+            }
         }
     }
-    static void copyHeadersFromServerToClient(Headers header, Map<String,List<String>> conn)
-    {
-        Set <String> keys = conn.keySet();
-        for (String key : keys) {
-            for (String value : conn.get(key)) {
-                if (!"Transfer-Encoding".equalsIgnoreCase(key))
-                    header.add(key, value);
-            }
-        }
-    }
-    static void copyHeadersFromClientToServer(HttpURLConnection conn, Headers header)
-    {
-        Set<String> keys = header.keySet();
-        for (String key : keys) {
-            for (String value : header.get(key)) {
-                conn.addRequestProperty(key, value);
-            }
-        }
+    static void handleError (HttpExchange exchange, int err_code, String err_msg) throws IOException {
+        exchange.getResponseHeaders().set("Content-Type", "text/plain");
+        exchange.sendResponseHeaders(err_code, err_msg.length());
+        OutputStream os = exchange.getResponseBody();
+        os.write(err_msg.getBytes());
+        os.close();
     }
 }
