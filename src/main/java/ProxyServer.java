@@ -2,6 +2,7 @@ import com.sun.net.httpserver.*;
 
 import java.io.*;
 import java.net.*;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.Map;
@@ -12,9 +13,27 @@ import java.util.Map;
  */
 public class ProxyServer {
 
+    private static ArrayList<String> blacklist;
+    private static StatsManager stats;
+
     public static void main(String[] args) throws Exception {
         int port = 9000;
 
+        try {
+            blacklist = getBlackList("src/main/resources/blacklist.txt");
+            stats = new StatsManager("src/main/resources/stats.csv");
+            stats.readFromFile();
+            System.out.println(stats);
+            for (String domain : blacklist) {
+                System.out.println(domain);
+            }
+        } catch (FileNotFoundException e) {
+            System.err.println("File Not Found");
+            return;
+        } catch (IOException e) {
+            System.err.println("Access to file error");
+            return;
+        }
 
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
         server.createContext("/", new RootHandler());
@@ -25,23 +44,26 @@ public class ProxyServer {
 
     static class RootHandler implements HttpHandler {
         public void handle(HttpExchange exchange) throws IOException {
-
             OutputStream out = null;
             byte [] requestedBody = null;
             byte [] responseBody = null;
             HttpURLConnection conn = null;
-
+            URI uri = exchange.getRequestURI();
             Headers requestHeader   = exchange.getRequestHeaders();
             Headers responseHeaders = exchange.getResponseHeaders();
 
+            if (blacklist.contains(uri.getHost())) {
+                handleError(exchange, 403, "Forbidden");
+                return;
+            }
+
             try {
-                conn = (HttpURLConnection) exchange.getRequestURI().toURL().openConnection();
+                conn = (HttpURLConnection) uri.toURL().openConnection();
                 conn.setRequestMethod(exchange.getRequestMethod());
                 conn.setInstanceFollowRedirects(false);
-
                 copyHeadersFromClientToServer(conn, requestHeader);
-
                 requestedBody = exchange.getRequestBody().readAllBytes();
+
                 if (requestedBody.length > 0) {
                     conn.setDoOutput(true);
                     out = conn.getOutputStream();
@@ -57,11 +79,13 @@ public class ProxyServer {
 
                 copyHeadersFromServerToClient(responseHeaders, conn.getHeaderFields());
                 responseHeaders.add("Via", InetAddress.getLocalHost().toString());
-                responseHeaders.set("Content-Type", conn.getContentType());
-                exchange.sendResponseHeaders(conn.getResponseCode(), conn.getContentLength());
+                exchange.sendResponseHeaders(conn.getResponseCode(), responseBody.length);
                 out = exchange.getResponseBody();
                 out.write(responseBody);
                 out.close();
+
+                stats.update(uri.getHost(), responseBody.length + requestedBody.length);
+                stats.writeToFile();
 
             } catch (MalformedURLException e) {
                 handleError(exchange, 400, "Bad Request");
@@ -98,5 +122,25 @@ public class ProxyServer {
         OutputStream os = exchange.getResponseBody();
         os.write(err_msg.getBytes());
         os.close();
+    }
+
+    static ArrayList<String> getBlackList(String filename) throws FileNotFoundException, IOException
+    {
+        ArrayList<String> list = new ArrayList<String>();
+        BufferedReader inputStream = null;
+        try {
+            inputStream = new BufferedReader(new FileReader(filename));
+
+            String line;
+            while ((line = inputStream.readLine()) != null) {
+                list.add(line);
+            }
+
+        } finally {
+            if (inputStream != null)
+                inputStream.close();
+        }
+        return list;
+
     }
 }
